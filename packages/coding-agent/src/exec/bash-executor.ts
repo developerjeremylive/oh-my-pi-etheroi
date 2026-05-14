@@ -4,7 +4,7 @@
  * Uses brush-core via native bindings for shell execution.
  */
 import * as fs from "node:fs/promises";
-import { executeShell, type MinimizerOptions, Process, Shell } from "@oh-my-pi/pi-natives";
+import { executeShell, type MinimizerOptions, Shell } from "@oh-my-pi/pi-natives";
 import { Settings, type ShellMinimizerSettings } from "../config/settings";
 import { OutputSink } from "../session/streaming-output";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
@@ -78,131 +78,77 @@ export function buildMinimizerOptions(group: ShellMinimizerSettings): MinimizerO
 }
 
 /**
- * Execute a command by spawning the configured shell binary directly, bypassing
- * brush-core. Used for non-bash shells (PowerShell, cmd.exe) where bash
- * variable expansion would otherwise mangle syntax like `$env:VAR`.
+ * Escape PowerShell `$env:VAR` references so brush-core's POSIX variable
+ * expansion does not collapse them to `:VAR`.
  *
- * stdout and stderr are merged into the sink in arrival order.
+ * In POSIX a `:` terminates a parameter name, so `$env:SystemRoot` parses as
+ * `${env}` followed by the literal `:SystemRoot`. `$env` is unset under brush,
+ * which leaves the colon-prefixed remainder behind and mangles commands that
+ * invoke PowerShell as a subprocess (e.g. `powershell -Command "Write-Host
+ * $env:SystemRoot"`).
+ *
+ * The fix is purely textual: we walk the command, leave single-quoted regions
+ * and existing `\X` escapes alone, and prepend `\` to every unescaped
+ * `$env:<word-char>` occurrence outside single quotes. Brush then forwards
+ * the literal `$env:NAME` to the PowerShell child where it has its native
+ * meaning. The check is case-insensitive because PowerShell accepts `$Env:`,
+ * `$ENV:` and `$env:` interchangeably.
  */
-async function executeViaDirectSpawn(
-	shell: string,
-	shellArgs: string[],
-	command: string,
-	options: BashExecutorOptions | undefined,
-	commandCwd: string | undefined,
-	commandEnv: Record<string, string>,
-	shellEnv: Record<string, string>,
-	sink: OutputSink,
-	baseTimeoutMs: number,
-): Promise<BashResult> {
-	// Append the command as the final argument (e.g. pwsh -NoProfile ... -Command <cmd>).
-	const proc = Bun.spawn([shell, ...shellArgs, command], {
-		cwd: commandCwd,
-		env: { ...shellEnv, ...commandEnv },
-		stdout: "pipe",
-		stderr: "pipe",
-	});
-
-	const userSignal = options?.signal;
-	let timedOut = false;
-
-	// Tree-kill the entire process group so child processes spawned by the shell
-	// (e.g. python, npm) do not outlive their parent after a cancel or timeout.
-	const treeKill = (): void =>
-		void Process.fromPid(proc.pid)
-			?.terminate()
-			?.catch(() => {});
-
-	const abortHandler = () => {
-		treeKill();
-	};
-	if (userSignal?.aborted) {
-		treeKill();
-	} else if (userSignal) {
-		userSignal.addEventListener("abort", abortHandler, { once: true });
+export function preservePowerShellEnvVars(command: string): string {
+	let result = "";
+	let inSingleQuote = false;
+	let i = 0;
+	while (i < command.length) {
+		const ch = command[i];
+		if (inSingleQuote) {
+			if (ch === "'") inSingleQuote = false;
+			result += ch;
+			i++;
+			continue;
+		}
+		if (ch === "'") {
+			inSingleQuote = true;
+			result += ch;
+			i++;
+			continue;
+		}
+		// Preserve existing backslash escapes verbatim so `\$env:` stays single-escaped.
+		if (ch === "\\" && i + 1 < command.length) {
+			result += command.slice(i, i + 2);
+			i += 2;
+			continue;
+		}
+		if (
+			ch === "$" &&
+			i + 5 < command.length &&
+			command.slice(i + 1, i + 5).toLowerCase() === "env:" &&
+			/[A-Za-z_]/.test(command[i + 5])
+		) {
+			result += "\\$";
+			i++;
+			continue;
+		}
+		result += ch;
+		i++;
 	}
-
-	// Soft timeout mirrors the contract of the brush path: honour options.timeout.
-	const softTimeoutTimer = setTimeout(() => {
-		timedOut = true;
-		treeKill();
-	}, baseTimeoutMs);
-
-	// Hard timeout is a backstop in case the soft kill stalls.
-	const hardTimeoutMs = baseTimeoutMs + HARD_TIMEOUT_GRACE_MS;
-	const hardTimeoutTimer = setTimeout(() => {
-		timedOut = true;
-		treeKill();
-	}, hardTimeoutMs);
-
-	const stdoutDecoder = new TextDecoder();
-	const stderrDecoder = new TextDecoder();
-
-	async function drainStream(stream: ReadableStream<Uint8Array>, dec: TextDecoder): Promise<void> {
-		const reader = (stream as ReadableStream<Uint8Array>).getReader();
-		try {
-			while (true) {
-				const { done, value } = await reader.read();
-				if (done) break;
-				sink.push(dec.decode(value, { stream: true }));
-			}
-			const tail = dec.decode();
-			if (tail) sink.push(tail);
-		} finally {
-			reader.releaseLock();
-		}
-	}
-
-	try {
-		await Promise.all([
-			drainStream(proc.stdout as ReadableStream<Uint8Array>, stdoutDecoder),
-			drainStream(proc.stderr as ReadableStream<Uint8Array>, stderrDecoder),
-			proc.exited,
-		]);
-
-		if (timedOut) {
-			return {
-				exitCode: undefined,
-				cancelled: true,
-				...(await sink.dump(`Command exceeded timeout after ${Math.round(baseTimeoutMs / 1000)} seconds`)),
-			};
-		}
-
-		if (userSignal?.aborted) {
-			return {
-				exitCode: undefined,
-				cancelled: true,
-				...(await sink.dump("Command cancelled")),
-			};
-		}
-
-		return {
-			exitCode: proc.exitCode ?? undefined,
-			cancelled: false,
-			...(await sink.dump()),
-		};
-	} finally {
-		clearTimeout(softTimeoutTimer);
-		clearTimeout(hardTimeoutTimer);
-		if (userSignal) {
-			userSignal.removeEventListener("abort", abortHandler);
-		}
-	}
+	return result;
 }
 
 export async function executeBash(command: string, options?: BashExecutorOptions): Promise<BashResult> {
 	const settings = await Settings.init();
-	const { shell, kind: shellKind, args: shellArgs, env: shellEnv, prefix } = settings.getShellConfig();
-	const snapshotPath = shellKind === "bash" ? await getOrCreateSnapshot(shell, shellEnv) : null;
+	const { shell, env: shellEnv, prefix } = settings.getShellConfig();
+	const snapshotPath = shell.includes("bash") ? await getOrCreateSnapshot(shell, shellEnv) : null;
 
 	const minimizer = buildMinimizerOptions(settings.getGroup("shellMinimizer"));
 
 	const commandCwd = await resolveShellCwd(options?.cwd);
 	const commandEnv = options?.env ? { ...NON_INTERACTIVE_ENV, ...options.env } : NON_INTERACTIVE_ENV;
 
-	// Apply command prefix if configured
+	// Apply command prefix if configured, then preserve any `$env:VAR` references
+	// that PowerShell expects (brush would otherwise expand `$env` as an unset
+	// POSIX parameter and leave the colon dangling — see #1079).
 	const prefixedCommand = prefix ? `${prefix} ${command}` : command;
-	const finalCommand = prefixedCommand;
+	const finalCommand = preservePowerShellEnvVars(prefixedCommand);
 
 	// Create output sink for truncation and artifact handling
 	const sink = new OutputSink({
@@ -223,30 +169,12 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		sink.push(chunk);
 	};
 
-	const baseTimeoutMs = Math.max(1_000, options?.timeout ?? 300_000);
-
 	if (options?.signal?.aborted) {
 		return {
 			exitCode: undefined,
 			cancelled: true,
 			...(await sink.dump("Command cancelled")),
 		};
-	}
-
-	// Non-bash shells (PowerShell, cmd.exe) bypass brush-core entirely so that
-	// shell-native syntax like $env:VAR is not mangled by bash variable expansion.
-	if (shellKind !== "bash") {
-		return executeViaDirectSpawn(
-			shell,
-			shellArgs,
-			finalCommand,
-			options,
-			commandCwd,
-			commandEnv,
-			shellEnv,
-			sink,
-			baseTimeoutMs,
-		);
 	}
 
 	const sessionKey = buildSessionKey(shell, prefix, snapshotPath, shellEnv, options?.sessionKey, minimizer);
@@ -284,7 +212,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 
 	let hardTimeoutTimer: NodeJS.Timeout | undefined;
 	const hardTimeoutDeferred = Promise.withResolvers<"hard-timeout">();
-
+	const baseTimeoutMs = Math.max(1_000, options?.timeout ?? 300_000);
 	const hardTimeoutMs = baseTimeoutMs + HARD_TIMEOUT_GRACE_MS;
 	hardTimeoutTimer = setTimeout(() => {
 		abortCurrentExecution();

@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { executeBash } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
+import { executeBash, preservePowerShellEnvVars } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import * as shellSnapshot from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
 
@@ -474,18 +474,52 @@ describe("executeBash", () => {
 		expect(fs.existsSync(marker)).toBe(false);
 	});
 
-	it("passes $env:VAR syntax to PowerShell without bash expansion (Windows)", async () => {
-		// This test only runs on Windows, where the shell defaults to pwsh.exe
-		// and commands must NOT be routed through brush to avoid $env mangling.
+	it("preserves $env:VAR references when invoking PowerShell from brush (Windows)", async () => {
+		// Regression for #1079. Brush executes the bash command; the agent invokes
+		// PowerShell as a subprocess. Without escaping, brush expands `$env` (unset)
+		// and leaves `:OMPCODE`. The preprocessor escapes the dollar so the literal
+		// `$env:OMPCODE` reaches PowerShell, which resolves it to "1".
 		if (process.platform !== "win32") return;
 
-		// $env:OMPCODE is set to "1" by buildSpawnEnv; brush would expand $env to ""
-		// producing ":OMPCODE" instead of the actual value.
-		const result = await executeBash("Write-Host $env:OMPCODE", {
+		const result = await executeBash('powershell -NoProfile -Command "Write-Host $env:OMPCODE"', {
 			cwd: tempDir,
 			timeout: 10_000,
 		});
 		expect(result.exitCode).toBe(0);
 		expect(result.output.trim()).toBe("1");
+	});
+});
+
+describe("preservePowerShellEnvVars", () => {
+	it("escapes $env:VAR outside quotes", () => {
+		expect(preservePowerShellEnvVars("echo $env:SystemRoot")).toBe("echo \\$env:SystemRoot");
+	});
+
+	it("escapes $env:VAR inside double quotes", () => {
+		expect(preservePowerShellEnvVars('powershell -Command "Write-Host $env:OMPCODE"')).toBe(
+			'powershell -Command "Write-Host \\$env:OMPCODE"',
+		);
+	});
+
+	it("leaves $env:VAR inside single quotes alone", () => {
+		expect(preservePowerShellEnvVars("echo '$env:Foo'")).toBe("echo '$env:Foo'");
+	});
+
+	it("does not double-escape an already-escaped reference", () => {
+		expect(preservePowerShellEnvVars("echo \\$env:Foo")).toBe("echo \\$env:Foo");
+	});
+
+	it("is case-insensitive for the env prefix", () => {
+		expect(preservePowerShellEnvVars("echo $Env:Path $ENV:Path")).toBe(
+			"echo \\$Env:Path \\$ENV:Path",
+		);
+	});
+
+	it("ignores $env: without a following identifier", () => {
+		expect(preservePowerShellEnvVars("echo $env: $env:")).toBe("echo $env: $env:");
+	});
+
+	it("leaves unrelated $VAR references untouched", () => {
+		expect(preservePowerShellEnvVars("echo $HOME $PATH")).toBe("echo $HOME $PATH");
 	});
 });

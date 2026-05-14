@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed `$env:VAR` PowerShell variables being mangled on Windows: brush (Rust bash) was expanding `$env` as an empty bash variable before passing commands to `powershell.exe`. Windows now defaults to `pwsh.exe` / `powershell.exe` as the shell (in preference to Git Bash), and non-bash shell commands bypass brush entirely via direct process spawn, preserving PowerShell syntax verbatim ([#1079](https://github.com/can1357/oh-my-pi/issues/1079))
+- Fixed `$env:VAR` PowerShell variables being mangled on Windows when `executeBash` invoked PowerShell as a subprocess (e.g. `powershell -Command "Write-Host $env:SystemRoot"`). Brush-core applied POSIX parameter expansion to `$env` before spawning the child, leaving a dangling `:NAME`. `bash-executor` now escapes unquoted `$env:<word>` references with a single backslash so the literal token reaches PowerShell verbatim; single-quoted regions and already-escaped occurrences are left untouched. Brush stays as the executor on every platform. Exposed as `preservePowerShellEnvVars` from `@oh-my-pi/pi-coding-agent/exec/bash-executor` ([#1079](https://github.com/can1357/oh-my-pi/issues/1079))
 
 
 ## [15.0.1] - 2026-05-14

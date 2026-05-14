@@ -5,12 +5,8 @@ import type { Subprocess } from "bun";
 import { $env } from "./env";
 import { $which } from "./which";
 
-/** Identifies the shell dialect used for command execution. */
-export type ShellKind = "bash" | "powershell" | "cmd";
-
 export interface ShellConfig {
 	shell: string;
-	kind: ShellKind;
 	args: string[];
 	env: Record<string, string>;
 	prefix: string | undefined;
@@ -78,19 +74,10 @@ function getShellPrefix(): string | undefined {
 /**
  * Build full shell config from a shell path.
  */
-function buildConfig(shell: string, kind: ShellKind = "bash"): ShellConfig {
-	let args: string[];
-	if (kind === "powershell") {
-		args = ["-NoProfile", "-NonInteractive", "-Command"];
-	} else if (kind === "cmd") {
-		args = ["/c"];
-	} else {
-		args = getShellArgs();
-	}
+function buildConfig(shell: string): ShellConfig {
 	return {
 		shell,
-		kind,
-		args,
+		args: getShellArgs(),
 		env: buildSpawnEnv(shell),
 		prefix: getShellPrefix(),
 	};
@@ -124,7 +111,7 @@ export function resolveBasicShell(): string | undefined {
  * Get shell configuration based on platform.
  * Resolution order:
  * 1. User-specified shellPath in settings.json
- * 2. On Windows: pwsh.exe, then powershell.exe, then Git Bash, then bash on PATH
+ * 2. On Windows: Git Bash in known locations, then bash on PATH
  * 3. On Unix: $SHELL if bash/zsh, then fallback paths
  * 4. Fallback: sh
  */
@@ -136,15 +123,7 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 	// 1. Check user-specified shell path
 	if (customShellPath) {
 		if (fs.existsSync(customShellPath)) {
-			// Detect kind from the path name.
-			const lc = customShellPath.toLowerCase();
-			const kind: ShellKind =
-				lc.includes("pwsh") || lc.includes("powershell")
-					? "powershell"
-					: lc.includes("cmd.exe") || lc === "cmd"
-						? "cmd"
-						: "bash";
-			cachedShellConfig = buildConfig(customShellPath, kind);
+			cachedShellConfig = buildConfig(customShellPath);
 			return cachedShellConfig;
 		}
 		throw new Error(
@@ -153,37 +132,25 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 	}
 
 	if (process.platform === "win32") {
-		// 2. Prefer PowerShell: $env:VAR syntax works natively without bash
-		//    variable expansion mangling the dollar-sign references.
-		const pwshPath = $which("pwsh.exe") ?? $which("pwsh");
-		if (pwshPath) {
-			cachedShellConfig = buildConfig(pwshPath, "powershell");
-			return cachedShellConfig;
-		}
-		const pshPath = $which("powershell.exe") ?? $which("powershell");
-		if (pshPath) {
-			cachedShellConfig = buildConfig(pshPath, "powershell");
-			return cachedShellConfig;
-		}
-
-		// 3. Try Git Bash in known locations (bash-heavy workflows)
-		const gitBashPaths: string[] = [];
+		// 2. Try Git Bash in known locations
+		const paths: string[] = [];
 		const programFiles = Bun.env.ProgramFiles;
 		if (programFiles) {
-			gitBashPaths.push(`${programFiles}\\Git\\bin\\bash.exe`);
+			paths.push(`${programFiles}\\Git\\bin\\bash.exe`);
 		}
 		const programFilesX86 = Bun.env["ProgramFiles(x86)"];
 		if (programFilesX86) {
-			gitBashPaths.push(`${programFilesX86}\\Git\\bin\\bash.exe`);
+			paths.push(`${programFilesX86}\\Git\\bin\\bash.exe`);
 		}
-		for (const gitBash of gitBashPaths) {
-			if (fs.existsSync(gitBash)) {
-				cachedShellConfig = buildConfig(gitBash);
+
+		for (const path of paths) {
+			if (fs.existsSync(path)) {
+				cachedShellConfig = buildConfig(path);
 				return cachedShellConfig;
 			}
 		}
 
-		// 4. Fallback: bash.exe on PATH (Cygwin, MSYS2, WSL, etc.)
+		// 3. Fallback: search bash.exe on PATH (Cygwin, MSYS2, WSL, etc.)
 		const bashOnPath = $which("bash.exe");
 		if (bashOnPath) {
 			cachedShellConfig = buildConfig(bashOnPath);
@@ -191,10 +158,11 @@ export function getShellConfig(customShellPath?: string): ShellConfig {
 		}
 
 		throw new Error(
-			`No shell found on Windows. Options:\n` +
-				`  1. Install PowerShell (recommended): https://aka.ms/PowerShell\n` +
-				`  2. Install Git for Windows for bash: https://git-scm.com/download/win\n` +
-				`  3. Set shellPath in ~/.omp/agent/settings.json\n`,
+			`No bash shell found. Options:\n` +
+				`  1. Install Git for Windows: https://git-scm.com/download/win\n` +
+				`  2. Add your bash to PATH (Cygwin, MSYS2, etc.)\n` +
+				`  3. Set shellPath in ~/.omp/agent/settings.json\n\n` +
+				`Searched Git Bash in:\n${paths.map(p => `  ${p}`).join("\n")}`,
 		);
 	}
 
