@@ -12,7 +12,7 @@ description = "Push the workspace branch to origin. Uses credentials configured 
 branch = "Optional explicit branch name; defaults to the workspace branch."
 
 [gh_open_pr]
-description = "Open a pull request from the workspace branch using the PR body template."
+description = "Open a pull request from the workspace branch using the PR body template. Runs `bun check` first when the repository defines a `check` script; if it fails, fix and retry instead of opening the PR."
 
 [gh_open_pr.parameters]
 body = "Markdown body. MUST include the four template sections in order: `## Repro`, `## Cause`, `## Fix`, `## Verification`."

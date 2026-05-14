@@ -13,7 +13,8 @@ import subprocess
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from pathlib import Path
+from typing import Any, NoReturn
 
 from omp_rpc import HostTool, HostToolContext, RpcCommandError, host_tool
 
@@ -23,6 +24,9 @@ from robomp.github_client import GitHubClient, GitHubError, IssueInfo, RepoInfo
 from robomp.sandbox import Workspace
 
 log = logging.getLogger(__name__)
+_PRE_PR_CHECK_COMMAND = ("bun", "check")
+_PRE_PR_CHECK_TIMEOUT_SECONDS = 600.0
+_PRE_PR_CHECK_MAX_OUTPUT = 12_000
 
 
 @dataclass(slots=True, frozen=True)
@@ -61,8 +65,86 @@ def _audit(
     )
 
 
-def _raise_command(message: str) -> Any:
+def _raise_command(message: str) -> NoReturn:
     raise RpcCommandError(message, error={"message": message})
+
+
+def _has_bun_check_script(repo_dir: Path) -> bool:
+    package_json = repo_dir / "package.json"
+    if not package_json.is_file():
+        return False
+    try:
+        package = json.loads(package_json.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        # If package.json exists but cannot be parsed, let `bun check` surface
+        # the repository-native error instead of silently skipping the gate.
+        return True
+    if not isinstance(package, Mapping):
+        return True
+    scripts = package.get("scripts")
+    return isinstance(scripts, Mapping) and isinstance(scripts.get("check"), str)
+
+
+def _format_process_output(stdout: Any, stderr: Any) -> str:
+    parts: list[str] = []
+    for stream in (stdout, stderr):
+        if isinstance(stream, bytes):
+            text = stream.decode(errors="replace")
+        elif isinstance(stream, str):
+            text = stream
+        elif stream is None:
+            continue
+        else:
+            text = str(stream)
+        text = text.strip()
+        if text:
+            parts.append(text)
+    output = "\n".join(parts)
+    if not output:
+        return "(no output)"
+    if len(output) <= _PRE_PR_CHECK_MAX_OUTPUT:
+        return output
+    return (
+        f"... output truncated to last {_PRE_PR_CHECK_MAX_OUTPUT} characters ...\n{output[-_PRE_PR_CHECK_MAX_OUTPUT:]}"
+    )
+
+
+def _run_pre_pr_bun_check(bindings: ToolBindings, args: Mapping[str, Any]) -> None:
+    if not _has_bun_check_script(bindings.workspace.repo_dir):
+        return
+    try:
+        proc = subprocess.run(
+            _PRE_PR_CHECK_COMMAND,
+            cwd=str(bindings.workspace.repo_dir),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_PRE_PR_CHECK_TIMEOUT_SECONDS,
+        )
+    except FileNotFoundError:
+        msg = "refusing to open PR: `bun check` is required before PR creation, but `bun` is not on PATH."
+        _audit(bindings, "gh_open_pr", args, error=msg)
+        _raise_command(msg)
+    except subprocess.TimeoutExpired as exc:
+        output = _format_process_output(exc.stdout, exc.stderr)
+        msg = (
+            "refusing to open PR: `bun check` timed out before PR creation.\n"
+            f"{output}\n\n"
+            "Fix the check hang/failure, rerun `bun check`, commit any resulting changes, "
+            "and retry `gh_open_pr`."
+        )
+        _audit(bindings, "gh_open_pr", args, error=msg)
+        _raise_command(msg)
+    if proc.returncode != 0:
+        output = _format_process_output(proc.stdout, proc.stderr)
+        msg = (
+            f"refusing to open PR: `bun check` failed before PR creation (exit {proc.returncode}).\n"
+            f"{output}\n\n"
+            "Fix the reported failures, rerun `bun check` successfully, commit any resulting changes, "
+            "and retry `gh_open_pr`."
+        )
+        _audit(bindings, "gh_open_pr", args, error=msg)
+        _raise_command(msg)
 
 
 # ---------- gh_post_comment ----------
@@ -264,6 +346,7 @@ def _build_open_pr(bindings: ToolBindings) -> HostTool[Any, Any]:
                 "GitHub auto-closes the issue when the PR merges. Put it at the end of the "
                 "Verification section per the template."
             )
+        _run_pre_pr_bun_check(bindings, args)
         # Make sure the branch is pushed (idempotent) using the same preflight as gh_push_branch.
         _guarded_push_branch(bindings, args, "gh_open_pr", bindings.workspace.branch)
         base = args.get("base") or bindings.repo.default_branch

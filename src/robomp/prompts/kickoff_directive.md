@@ -19,6 +19,12 @@ example, if you classify as `enhancement` you would normally wait for an
 
 ---
 
+## Prior conversation
+
+{{thread}}
+
+---
+
 ## Directive from @{{directive.author}}
 
 {{directive.body}}
@@ -34,9 +40,10 @@ example, if you classify as `enhancement` you would normally wait for an
 
 2. **Execute the directive** in the same session, on this worktree:
    - Code change → commit on `{{workspace.branch}}`, run the project formatter
-     before each commit, `gh_push_branch`, `gh_open_pr` with the standard
-     `## Repro / ## Cause / ## Fix / ## Verification` body. Reply with a
-     single `gh_post_comment` linking the PR.
+     before each commit, run `bun check` when available and iterate until it
+     passes, `gh_push_branch`, `gh_open_pr` with the standard `## Repro /
+     ## Cause / ## Fix / ## Verification` body. Reply with a single
+     `gh_post_comment` linking the PR.
    - Question / clarification → one `gh_post_comment` answering it. No
      branch, no PR.
    - Explicit "stop" / "ignore" → one `gh_post_comment` acknowledging,

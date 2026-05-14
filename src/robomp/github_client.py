@@ -66,6 +66,29 @@ class PullRequestInfo:
 
 
 @dataclass(slots=True, frozen=True)
+class ReviewCommentInfo:
+    """In-line PR review comment (attached to a file/line)."""
+
+    id: int
+    author: str
+    body: str
+    path: str
+    line: int | None
+    created_at: str
+
+
+@dataclass(slots=True, frozen=True)
+class PullRequestReviewInfo:
+    """Top-level PR review (the summary block, not the inline comments)."""
+
+    id: int
+    author: str
+    body: str
+    state: str  # APPROVED / CHANGES_REQUESTED / COMMENTED
+    submitted_at: str
+
+
+@dataclass(slots=True, frozen=True)
 class IssueSummary:
     """Lightweight projection of an issue for list views (no body)."""
 
@@ -220,6 +243,57 @@ class GitHubClient:
         data = await self.request("GET", f"/repos/{repo}/issues/{number}/comments", params={"per_page": 100})
         return [_comment_from_payload(item) for item in (data or [])]
 
+    async def list_review_comments(self, repo: str, pr_number: int) -> list[ReviewCommentInfo]:
+        """List inline review comments on a PR (the ones attached to a path:line)."""
+        data = await self.request(
+            "GET",
+            f"/repos/{repo}/pulls/{pr_number}/comments",
+            params={"per_page": 100},
+        )
+        out: list[ReviewCommentInfo] = []
+        for item in data or []:
+            user = item.get("user") or {}
+            line = item.get("line")
+            if not isinstance(line, int):
+                orig = item.get("original_line")
+                line = orig if isinstance(orig, int) else None
+            out.append(
+                ReviewCommentInfo(
+                    id=int(item.get("id") or 0),
+                    author=str(user.get("login") or ""),
+                    body=str(item.get("body") or ""),
+                    path=str(item.get("path") or ""),
+                    line=line,
+                    created_at=str(item.get("created_at") or ""),
+                )
+            )
+        return out
+
+    async def list_pr_reviews(self, repo: str, pr_number: int) -> list[PullRequestReviewInfo]:
+        """List top-level reviews on a PR. Empty-body reviews are skipped — they
+        carry no novel text beyond what the inline comments + merge state convey."""
+        data = await self.request(
+            "GET",
+            f"/repos/{repo}/pulls/{pr_number}/reviews",
+            params={"per_page": 100},
+        )
+        out: list[PullRequestReviewInfo] = []
+        for item in data or []:
+            user = item.get("user") or {}
+            body = str(item.get("body") or "").strip()
+            if not body:
+                continue
+            out.append(
+                PullRequestReviewInfo(
+                    id=int(item.get("id") or 0),
+                    author=str(user.get("login") or ""),
+                    body=body,
+                    state=str(item.get("state") or ""),
+                    submitted_at=str(item.get("submitted_at") or item.get("created_at") or ""),
+                )
+            )
+        return out
+
     async def post_comment(self, repo: str, number: int, body: str) -> CommentInfo:
         data = await self.request(
             "POST",
@@ -362,6 +436,8 @@ __all__ = [
     "IssueInfo",
     "IssueSummary",
     "PullRequestInfo",
+    "PullRequestReviewInfo",
     "RepoInfo",
+    "ReviewCommentInfo",
     "parse_issue_payload",
 ]

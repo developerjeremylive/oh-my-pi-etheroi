@@ -130,6 +130,7 @@ def route(
     allowlist: frozenset[str],
     bot_login: str,
     maintainers: frozenset[str] = frozenset(),
+    reviewer_bots: frozenset[str] = frozenset(),
     resolve_issue_from_pr: PrIssueResolver = None,
 ) -> RouteDecision:
     """Decide whether and how to handle a webhook event.
@@ -158,8 +159,23 @@ def route(
             return None
         return resolve_issue_from_pr(repo, pr_number)  # type: ignore[arg-type]
 
-    def _directive_kwargs(body: str | None, login: str | None, assoc: str | None) -> dict[str, Any]:
-        """Decide whether this comment is a maintainer directive."""
+    def _reviewer_bot_login(user: Mapping[str, Any] | None) -> str | None:
+        """Return the lowercased login if this user is a configured reviewer bot."""
+        if not isinstance(user, Mapping):
+            return None
+        login = str(user.get("login") or "").lower()
+        return login if login and login in reviewer_bots else None
+
+    def _directive_kwargs(comment: Mapping[str, Any] | None, login: str | None, assoc: str | None) -> dict[str, Any]:
+        """Decide whether this comment is a directive (reviewer-bot OR maintainer-mention)."""
+        if not isinstance(comment, Mapping):
+            return {}
+        body = str(comment.get("body") or "")
+        rb_login = _reviewer_bot_login(comment.get("user"))
+        if rb_login is not None:
+            # Reviewer bots like chatgpt-codex-connector speak authoritatively
+            # already — no `@bot` mention required; pass the full body through.
+            return {"directive": True, "directive_body": body, "directive_author": rb_login}
         if not is_maintainer(login, assoc, maintainers=maintainers):
             return {}
         stripped = extract_mention(body, bot_login)
@@ -187,7 +203,8 @@ def route(
 
     if event_type == "issue_comment" and action == "created":
         comment = payload.get("comment") or {}
-        if _is_bot_account(comment.get("user"), bot_login):
+        rb_login = _reviewer_bot_login(comment.get("user"))
+        if rb_login is None and _is_bot_account(comment.get("user"), bot_login):
             return RouteDecision("skip", None, repo, None, "bot/self comment")
         issue = payload.get("issue") or {}
         number = issue.get("number")
@@ -201,7 +218,6 @@ def route(
             if key is None:
                 return RouteDecision("skip", None, repo, None, f"PR #{number} is not mapped to an issue")
             login, assoc = _submitter_info(comment)
-            body = str(comment.get("body") or "")
             return RouteDecision(
                 "queue",
                 "handle_pr_conversation",
@@ -210,11 +226,10 @@ def route(
                 f"issue_comment.created on PR #{number}",
                 submitter=login,
                 association=assoc,
-                **_directive_kwargs(body, login, assoc),
+                **_directive_kwargs(comment, login, assoc),
             )
         key = issue_key(repo, number)
         login, assoc = _submitter_info(comment)
-        body = str(comment.get("body") or "")
         return RouteDecision(
             "queue",
             "handle_comment",
@@ -223,12 +238,13 @@ def route(
             "issue_comment.created",
             submitter=login,
             association=assoc,
-            **_directive_kwargs(body, login, assoc),
+            **_directive_kwargs(comment, login, assoc),
         )
 
     if event_type == "pull_request_review_comment" and action == "created":
         comment = payload.get("comment") or {}
-        if _is_bot_account(comment.get("user"), bot_login):
+        rb_login = _reviewer_bot_login(comment.get("user"))
+        if rb_login is None and _is_bot_account(comment.get("user"), bot_login):
             return RouteDecision("skip", None, repo, None, "bot/self review comment")
         pr = payload.get("pull_request") or {}
         pr_user = pr.get("user") or {}
@@ -241,7 +257,6 @@ def route(
         if key is None:
             return RouteDecision("skip", None, repo, None, f"PR #{number} is not mapped to an issue")
         login, assoc = _submitter_info(comment)
-        body = str(comment.get("body") or "")
         return RouteDecision(
             "queue",
             "handle_review",
@@ -250,7 +265,7 @@ def route(
             "pull_request_review_comment.created",
             submitter=login,
             association=assoc,
-            **_directive_kwargs(body, login, assoc),
+            **_directive_kwargs(comment, login, assoc),
         )
 
     if event_type == "pull_request" and action == "closed":

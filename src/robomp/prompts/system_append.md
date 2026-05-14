@@ -62,10 +62,10 @@ The full fix loop:
    (`fix(scope): …` / `docs: …` / etc.). End the commit message body with
    `Fixes #{{issue.number}}` so reviewers see the linkage even at the commit
    level.
-9. `gh_push_branch`, then `gh_open_pr`. The push tool refuses if (a) the
-   working tree is dirty, (b) any commit's author isn't the configured
-   identity, or (c) running `bun run fix:tools` produces uncommitted
-   changes — fix any of these before retrying.
+9. Run `bun check` when the repo defines it, then `gh_push_branch`, then
+   `gh_open_pr`. If `bun check` fails, fix the failures, rerun it
+   successfully, amend/commit any changes, and only then retry PR creation.
+   The host tools also refuse dirty working trees or commit author mismatches.
 10. After the PR is open, comment once more linking it.
 
 If you cannot reproduce after a real attempt, call `mark_unable_to_reproduce`

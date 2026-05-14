@@ -19,7 +19,7 @@ from robomp.github_client import (
     parse_issue_payload,
 )
 from robomp.sandbox import SandboxManager
-from robomp.worker import DirectiveInfo, TaskInputs, run_task
+from robomp.worker import DirectiveInfo, TaskInputs, ThreadMessage, run_task
 
 log = logging.getLogger(__name__)
 
@@ -55,6 +55,81 @@ def _directive_from_payload(payload: Mapping[str, Any]) -> DirectiveInfo | None:
     if not isinstance(author, str) or not author.strip():
         return None
     return DirectiveInfo(body=body, author=author)
+
+
+async def _fetch_thread(
+    github: GitHubClient, repo: str, number: int, *, is_pr: bool,
+) -> tuple[ThreadMessage, ...]:
+    """Pull the full conversation thread (body + comments + reviews) for `number`.
+
+    Best-effort: any sub-fetch that fails is logged + dropped so a stale
+    review-comments endpoint doesn't block the directive from running.
+    """
+    messages: list[ThreadMessage] = []
+
+    # 1. The issue / PR body itself. Use get_issue (issues endpoint also
+    #    returns PRs in GitHub's data model).
+    try:
+        item = await github.get_issue(repo, number)
+        if item.body and item.body.strip():
+            messages.append(ThreadMessage(
+                kind="pr_body" if is_pr else "issue_body",
+                author=item.author or "",
+                body=item.body,
+                created_at="",  # not exposed by IssueInfo
+            ))
+    except GitHubError as exc:
+        log.warning("thread body fetch failed", extra={"repo": repo, "n": number, "err": str(exc)})
+
+    # 2. Conversation comments (issue OR PR conversation).
+    try:
+        for c in await github.list_comments(repo, number):
+            messages.append(ThreadMessage(
+                kind="comment", author=c.author, body=c.body,
+                created_at=c.created_at,
+            ))
+    except GitHubError as exc:
+        log.warning("thread comments fetch failed", extra={"err": str(exc)})
+
+    if is_pr:
+        # 3. Inline review comments (attached to a path:line).
+        try:
+            for r in await github.list_review_comments(repo, number):
+                messages.append(ThreadMessage(
+                    kind="review_comment", author=r.author, body=r.body,
+                    created_at=r.created_at, path=r.path, line=r.line,
+                ))
+        except GitHubError as exc:
+            log.warning("thread review-comments fetch failed", extra={"err": str(exc)})
+        # 4. Top-level reviews (summaries).
+        try:
+            for rv in await github.list_pr_reviews(repo, number):
+                messages.append(ThreadMessage(
+                    kind="review", author=rv.author, body=rv.body,
+                    created_at=rv.submitted_at, state=rv.state,
+                ))
+        except GitHubError as exc:
+            log.warning("thread reviews fetch failed", extra={"err": str(exc)})
+
+    # ISO 8601 strings sort chronologically. Body has no timestamp so it
+    # sorts first (empty string < any "2026-…" string).
+    messages.sort(key=lambda m: m.created_at or "")
+    return tuple(messages)
+
+
+async def _attach_thread(
+    github: GitHubClient,
+    directive: DirectiveInfo | None,
+    repo: str,
+    number: int,
+    *,
+    is_pr: bool,
+) -> DirectiveInfo | None:
+    """Hydrate a directive with the live conversation thread (or no-op if None)."""
+    if directive is None:
+        return None
+    thread = await _fetch_thread(github, repo, number, is_pr=is_pr)
+    return DirectiveInfo(body=directive.body, author=directive.author, thread=thread)
 
 
 async def _resolve_repo_and_issue(
@@ -171,6 +246,7 @@ async def handle_comment(
             issue=issue,
             workspace=workspace,
         )
+        directive = await _attach_thread(github, directive, repo.full_name, issue.number, is_pr=False)
         await run_task(task_kind="triage_issue", inputs=inputs, directive=directive)
         return
 
@@ -216,6 +292,7 @@ async def handle_comment(
             issue=issue,
             workspace=workspace,
         )
+        directive = await _attach_thread(github, directive, repo.full_name, issue.number, is_pr=False)
         await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, directive=directive)
         return
 
@@ -237,6 +314,7 @@ async def handle_comment(
         issue=issue,
         workspace=workspace,
     )
+    directive = await _attach_thread(github, directive, repo.full_name, issue.number, is_pr=False)
     await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, directive=directive)
 
 
@@ -403,6 +481,7 @@ async def handle_pr_conversation(
         issue=issue,
         workspace=workspace,
     )
+    directive = await _attach_thread(github, directive, repo_full, pr_number, is_pr=True)
     await run_task(task_kind="handle_comment", inputs=inputs, comment=comment, pr_number=pr_number, directive=directive)
 
 

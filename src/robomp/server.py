@@ -108,6 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             allowlist=cfg.repo_allowlist,
             bot_login=cfg.bot_login,
             maintainers=cfg.maintainer_logins,
+            reviewer_bots=cfg.reviewer_bots,
             resolve_issue_from_pr=_resolve,
         )
 

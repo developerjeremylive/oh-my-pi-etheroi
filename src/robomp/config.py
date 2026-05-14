@@ -71,6 +71,10 @@ class Settings(BaseSettings):
     # mentions are treated as authoritative directives. These accounts also
     # bypass rate limiting regardless of `author_association`.
     maintainer_logins_raw: str = Field("", alias="ROBOMP_MAINTAINER_LOGINS")
+    # Bot logins (e.g. chatgpt-codex-connector) whose comments/reviews are
+    # treated as authoritative directives without requiring an `@bot` mention.
+    # Comma-separated; `@` prefix optional.
+    reviewer_bots_raw: str = Field("", alias="ROBOMP_REVIEWER_BOTS")
 
     @field_validator("bot_login", mode="after")
     @classmethod
@@ -136,6 +140,22 @@ class Settings(BaseSettings):
         if isinstance(v, (list, tuple)):
             return ",".join(str(item) for item in v)
         return str(v)
+
+    @field_validator("reviewer_bots_raw", mode="before")
+    @classmethod
+    def _coerce_reviewer_bots(cls, v: object) -> str:
+        if v is None:
+            return ""
+        if isinstance(v, str):
+            return v
+        if isinstance(v, (list, tuple)):
+            return ",".join(str(item) for item in v)
+        return str(v)
+
+    @property
+    def reviewer_bots(self) -> frozenset[str]:
+        items = [piece.strip().lstrip("@").lower() for piece in self.reviewer_bots_raw.split(",")]
+        return frozenset(item for item in items if item)
 
     @property
     def maintainer_logins(self) -> frozenset[str]:

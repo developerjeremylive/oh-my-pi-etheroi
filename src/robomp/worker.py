@@ -47,11 +47,28 @@ class TaskInputs:
 
 
 @dataclass(slots=True, frozen=True)
+class ThreadMessage:
+    """One entry in the conversation a directive carries to the agent."""
+    kind: str          # issue_body | pr_body | comment | review_comment | review
+    author: str
+    body: str
+    created_at: str
+    path: str | None = None     # review_comment only
+    line: int | None = None     # review_comment only
+    state: str | None = None    # review only (APPROVED / CHANGES_REQUESTED / COMMENTED)
+
+
+@dataclass(slots=True, frozen=True)
 class DirectiveInfo:
-    """A maintainer's `@bot` mention captured as an authoritative instruction."""
+    """A maintainer's `@bot` mention captured as an authoritative instruction.
+
+    `thread` is the full conversation context (issue/PR body + every prior
+    comment + every review) up to the moment the directive fired.
+    """
 
     body: str
     author: str
+    thread: tuple[ThreadMessage, ...] = ()
 
 
 def _build_extra_env(settings: Settings) -> dict[str, str]:
@@ -276,4 +293,4 @@ async def run_task(
     )
 
 
-__all__ = ["DirectiveInfo", "TaskInputs", "run_task"]
+__all__ = ["DirectiveInfo", "TaskInputs", "ThreadMessage", "run_task"]

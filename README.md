@@ -107,8 +107,8 @@ Numbered concretely so you can grep logs for each step.
 | `set_issue_labels` | Append labels later (e.g. add `wontfix`). Never removes existing. | Used for one-off adjustments outside the initial classify call. |
 | `gh_post_comment` | Comment on the originating issue or any specified PR/issue number. | All `gh_*` errors propagate as `RpcCommandError` the agent can recover from. |
 | `repro_record` | Persist a reproduction transcript (command, output, exit code, reproduced flag) under `context/repro/`. | Required before claiming a fix; PR template references the path. |
-| `gh_push_branch` | `git push --set-upstream origin <branch>` from the worktree. | Refuses to push when (a) working tree dirty, (b) any commit's author ≠ configured identity, (c) `bun run fix:tools` (if defined) produces uncommitted changes. |
-| `gh_open_pr` | Open a PR from the worktree branch. | Validates body has `## Repro`/`## Cause`/`## Fix`/`## Verification` headers AND `Fixes #N` (or `Closes`/`Resolves`) so GitHub auto-closes the issue on merge. Idempotent push first. Writes `pr.json` artifact + updates `issues.pr_number/state` in sqlite. |
+| `gh_push_branch` | `git push --set-upstream origin <branch>` from the worktree. | Refuses to push when (a) working tree dirty, (b) any commit's author ≠ configured identity. |
+| `gh_open_pr` | Open a PR from the worktree branch. | Validates body has `## Repro`/`## Cause`/`## Fix`/`## Verification` headers AND `Fixes #N` (or `Closes`/`Resolves`) so GitHub auto-closes the issue on merge. Runs `bun check` first when the repo defines a `check` script; a failure raises a recoverable tool error so the agent fixes, recommits, and retries before any PR is created. Idempotent push first. Writes `pr.json` artifact + updates `issues.pr_number/state` in sqlite. |
 | `gh_request_review` | Add reviewers / assignees. | Optional. |
 | `mark_unable_to_reproduce` | Close the loop without a PR. Posts a structured "Could not reproduce" comment with diagnosis + info request and marks issue `abandoned`. | Use when reproduction genuinely fails after a real attempt. |
 | `fetch_issue_thread` | Refetch the issue + comments from GitHub mid-task. | For long-running tasks that want fresh context. |
@@ -132,6 +132,7 @@ Every host-tool invocation is audited into the `tool_calls` table with timestamp
   diagnose               (no PR, no branch)    (no PR; wait for opt-in)
   bun run fix
   commit (Fixes #N)
+  bun check
   gh_push_branch
   gh_open_pr (template)
   link comment
@@ -321,8 +322,8 @@ docker compose logs -f robomp                 # in another shell, watch each too
 - **Pre-push gates** in `gh_push_branch`:
   1. branch must match the workspace branch (no opportunistic pushing to arbitrary refs),
   2. working tree must be clean,
-  3. every commit between `origin/<default-branch>..HEAD` must carry the configured `ROBOMP_GIT_AUTHOR_NAME` + `ROBOMP_GIT_AUTHOR_EMAIL`,
-  4. if `bun run fix:tools` (or `fix`) is defined and succeeds, it must not produce any working-tree diff (i.e. commits are already formatted).
+  3. every commit between `origin/<default-branch>..HEAD` must carry the configured `ROBOMP_GIT_AUTHOR_NAME` + `ROBOMP_GIT_AUTHOR_EMAIL`.
+- **Pre-PR check** in `gh_open_pr`: when the repository defines a package `check` script, `bun check` must pass before the branch is pushed or the PR is created. Failures are returned to the agent as `RpcCommandError` so it can iterate and retry.
 - **`/webhook/github` is the only public path.** The recommended Cloudflare ingress config restricts the tunnel hostname to that exact path; admin/inspection routes are localhost-only.
 - **LLM credentials never enter the container.** The host's LiteLLM proxy is reached via `extra_hosts: ["llm-gateway.internal:host-gateway"]`; the only thing mounted in is `~/.omp/agent/models.yml` (whose `apiKey` fields are stub characters — real auth happens at the gateway).
 
@@ -377,7 +378,7 @@ robomp/
 | `git push` fails with `Authentication required` | The PAT does not have push access on the repo, or `ROBOMP_BOT_LOGIN` doesn't match the PAT's account. The credentialed remote URL is `https://<bot_login>:<token>@github.com/<owner>/<repo>.git`. |
 | `refusing to push: commit author identity mismatch` | Some commit on the branch was authored under a different name/email. Amend with `git commit --amend --reset-author --no-edit`. The error lists every offending sha. |
 | `refusing to push: working tree is dirty` | Agent has uncommitted edits (often from `bun fix` running after a commit). `git add -A && git commit --amend --no-edit --reset-author` and retry. |
-| `refusing to push: `bun run fix:tools` produced unformatted-file changes` | Committed code isn't formatted. Same amend command as above. |
+| ``refusing to open PR: `bun check` failed before PR creation`` | The pre-PR check failed. Fix the reported failure, rerun `bun check`, commit or amend any resulting changes, then retry `gh_open_pr`. |
 | Agent loops on the same comment | A non-bot reply triggered `handle_comment`; check `/events?limit=20` to see what was queued and `/issues` for the per-issue state. |
 | PR opened without the four template sections, or without `Fixes #N` | Shouldn't happen — `gh_open_pr` validates both. If you see it, the agent reached an out-of-process write somehow; inspect `tool_calls`. |
 | `omp` fails with `Failed to load pi_natives` | The `pi_natives.linux-<arch>.node` is missing. Rebuild the image (`just build`); the `natives-builder` stage compiles it from `.pi-context/`. |

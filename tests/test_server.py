@@ -1447,3 +1447,68 @@ async def test_handle_comment_finalized_without_directive_still_replies(
     assert post_comment_calls, "should post the finalized-issue reply"
     assert sandbox.remove_calls == []
     close_database()
+
+
+async def test_directive_handler_attaches_thread_from_github(
+    settings: Settings, tmp_path: Path, stub_run_task, monkeypatch
+) -> None:
+    """When a directive lands, the handler must hydrate the thread before run_task."""
+    from robomp import tasks
+    from robomp.github_client import (
+        CommentInfo, GitHubClient, IssueInfo, RepoInfo,
+    )
+
+    sandbox = _RecordingSandbox(tmp_path)
+    db = get_database(settings.sqlite_path)
+
+    repo = RepoInfo(full_name="octo/widget", default_branch="main",
+                    clone_url="https://github.com/octo/widget.git", private=False)
+    issue = IssueInfo(repo="octo/widget", number=88, title="boom",
+                      body="the body", state="open", author="alice",
+                      labels=(), is_pull_request=False)
+
+    async def _resolve(_gh, _payload):
+        return repo, issue
+    monkeypatch.setattr(tasks, "_resolve_repo_and_issue", _resolve)
+
+    # Stub GitHubClient endpoints used by _fetch_thread.
+    async def _get_issue(self, _repo, _number):
+        return issue
+    async def _list_comments(self, _repo, _number):
+        return [
+            CommentInfo(id=1, author="alice", body="me too",
+                        created_at="2026-05-01T10:00:00Z"),
+            CommentInfo(id=2, author="bob", body="confirmed",
+                        created_at="2026-05-02T10:00:00Z"),
+        ]
+    monkeypatch.setattr(GitHubClient, "get_issue", _get_issue)
+    monkeypatch.setattr(GitHubClient, "list_comments", _list_comments)
+
+    payload = {
+        "action": "created",
+        "issue": {"number": 88, "user": {"login": "alice"}, "title": "boom"},
+        "comment": {"user": {"login": "can1357"}, "body": "@roboomp do X",
+                    "id": 10, "created_at": "2026-05-03T20:00:00Z"},
+        "repository": {"full_name": "octo/widget"},
+        "_robomp_directive": {"body": "do X", "author": "can1357"},
+    }
+    # Pre-seed an issue row so we exercise the "existing, non-finalized" path
+    # (otherwise we'd hit the bootstrap branch which is covered elsewhere).
+    db.upsert_issue(key="octo/widget#88", repo="octo/widget", number=88,
+                    state="reproducing", branch="farm/x/y")
+
+    await tasks.handle_comment(
+        settings=settings, db=db, github=GitHubClient("t"),
+        sandbox=sandbox, payload=payload,
+    )
+
+    assert len(stub_run_task) == 1
+    directive = stub_run_task[0]["directive"]
+    assert directive is not None
+    assert directive.body == "do X"
+    # Thread must include the body + both comments, in chronological order.
+    kinds_authors = [(m.kind, m.author) for m in directive.thread]
+    assert ("issue_body", "alice") in kinds_authors
+    assert ("comment", "alice") in kinds_authors
+    assert ("comment", "bob") in kinds_authors
+    close_database()

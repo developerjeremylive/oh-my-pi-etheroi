@@ -579,3 +579,92 @@ def test_route_directive_set_on_review_comment() -> None:
     assert decision.task == "handle_review"
     assert decision.directive is True
     assert decision.directive_body == "use a generator here"
+
+
+# ---------- reviewer bots ----------
+
+
+def test_route_reviewer_bot_comment_is_directive_without_mention() -> None:
+    decision = route(
+        "issue_comment",
+        {
+            "action": "created",
+            "comment": {
+                "user": {"login": "chatgpt-codex-connector", "type": "Bot"},
+                "body": "Found two issues in the diff: ...",
+            },
+            "issue": {"number": 9, "pull_request": {"url": "x"}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        reviewer_bots=frozenset({"chatgpt-codex-connector"}),
+        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+    )
+    assert decision.should_queue
+    assert decision.task == "handle_pr_conversation"
+    assert decision.directive is True
+    assert decision.directive_body == "Found two issues in the diff: ..."
+    assert decision.directive_author == "chatgpt-codex-connector"
+
+
+def test_route_reviewer_bot_review_comment_is_directive() -> None:
+    decision = route(
+        "pull_request_review_comment",
+        {
+            "action": "created",
+            "comment": {
+                "user": {"login": "chatgpt-codex-connector", "type": "Bot"},
+                "body": "This branch leaks memory.",
+            },
+            "pull_request": {"number": 50, "user": {"login": BOT}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        reviewer_bots=frozenset({"chatgpt-codex-connector"}),
+        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+    )
+    assert decision.should_queue
+    assert decision.task == "handle_review"
+    assert decision.directive is True
+    assert decision.directive_body == "This branch leaks memory."
+    assert decision.directive_author == "chatgpt-codex-connector"
+
+
+def test_route_random_bot_still_skipped_when_not_in_reviewer_list() -> None:
+    decision = route(
+        "issue_comment",
+        {
+            "action": "created",
+            "comment": {"user": {"login": "renovate", "type": "Bot"}, "body": "deps"},
+            "issue": {"number": 9},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        reviewer_bots=frozenset({"chatgpt-codex-connector"}),
+    )
+    assert not decision.should_queue
+    assert "bot" in decision.reason
+
+
+def test_route_reviewer_bot_login_case_insensitive() -> None:
+    decision = route(
+        "issue_comment",
+        {
+            "action": "created",
+            "comment": {
+                "user": {"login": "ChatGPT-Codex-Connector", "type": "Bot"},
+                "body": "feedback",
+            },
+            "issue": {"number": 9, "pull_request": {"url": "x"}},
+            "repository": {"full_name": "octo/widget"},
+        },
+        allowlist=ALLOWLIST,
+        bot_login=BOT,
+        reviewer_bots=frozenset({"chatgpt-codex-connector"}),
+        resolve_issue_from_pr=lambda _r, _n: "octo/widget#42",
+    )
+    assert decision.directive is True
+    assert decision.directive_author == "chatgpt-codex-connector"

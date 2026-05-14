@@ -725,6 +725,63 @@ def test_gh_open_pr_requires_closes_keyword(db: Database, tmp_path: Path) -> Non
         _stop_loop(loop, t)
 
 
+def test_gh_open_pr_refuses_failed_bun_check_before_push_or_pr(
+    db: Database, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """gh_open_pr sends a failing pre-PR check back to the agent without creating a PR."""
+    import os
+
+    opened_pr = False
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal opened_pr
+        opened_pr = True
+        return httpx.Response(
+            201,
+            json={
+                "number": 7,
+                "html_url": "https://github.com/octo/widget/pull/7",
+                "head": {"ref": "farm/abc12345/some-issue"},
+                "base": {"ref": "main"},
+            },
+        )
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    fakebin = tmp_path / "fakebin"
+    fakebin.mkdir()
+    fake_bun = fakebin / "bun"
+    fake_bun.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" != "check" ]; then printf "wrong command: %s\\n" "$1" >&2; exit 2; fi\n'
+        'printf "TypeError: property missing\\n" >&2\n'
+        "exit 1\n",
+        encoding="utf-8",
+    )
+    fake_bun.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{fakebin}{os.pathsep}{os.environ['PATH']}")
+    (bindings.workspace.repo_dir / "package.json").write_text(
+        json.dumps({"scripts": {"check": "tsc --noEmit"}}) + "\n",
+        encoding="utf-8",
+    )
+
+    try:
+        tool = next(x for x in build(bindings) if x.name == "gh_open_pr")
+        body = "## Repro\nrepro\n\n## Cause\ncause\n\n## Fix\nfix\n\n## Verification\nran tests\n\nFixes #42\n"
+        with pytest.raises(RpcCommandError) as exc:
+            tool.execute({"title": "fix: x", "body": body}, _ctx())
+    finally:
+        _stop_loop(loop, t)
+
+    msg = str(exc.value)
+    assert "`bun check` failed before PR creation" in msg
+    assert "TypeError: property missing" in msg
+    assert "retry `gh_open_pr`" in msg
+    assert not opened_pr
+    row = db._conn.execute("SELECT error FROM tool_calls WHERE tool='gh_open_pr' ORDER BY id DESC LIMIT 1").fetchone()
+    assert row is not None
+    assert "TypeError: property missing" in row["error"]
+
+
 def test_gh_push_branch_rejects_dirty_worktree(db: Database, tmp_path: Path) -> None:
     """Pre-push gate refuses if the working tree has uncommitted changes."""
     import os

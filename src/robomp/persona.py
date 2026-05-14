@@ -135,6 +135,42 @@ def kickoff(*, repo: RepoInfo, issue: IssueInfo, workspace: Workspace) -> str:
     return render(_load("kickoff_issue.md"), {"repo": repo, "issue": issue, "workspace": workspace})
 
 
+def _render_thread(messages: tuple) -> str:
+    """Render a `tuple[ThreadMessage, ...]` as a markdown block for prompt embed.
+
+    Duck-typed: any object with `.kind / .author / .body / .created_at` and
+    optional `.path / .line / .state` works. Kept here (not in worker.py) so
+    persona owns the prompt-shape.
+    """
+    if not messages:
+        return "(no prior conversation)"
+    parts: list[str] = []
+    for m in messages:
+        kind = getattr(m, "kind", "comment")
+        author = getattr(m, "author", "") or "unknown"
+        body = getattr(m, "body", "") or ""
+        ts = getattr(m, "created_at", "") or ""
+        if kind in ("issue_body", "pr_body"):
+            header = f"### @{author} — {'PR body' if kind == 'pr_body' else 'issue body'}"
+        elif kind == "review_comment":
+            path = getattr(m, "path", None)
+            line = getattr(m, "line", None)
+            anchor = f"`{path}`" + (f":L{line}" if isinstance(line, int) else "")
+            header = f"### @{author} — review comment on {anchor}"
+        elif kind == "review":
+            state = getattr(m, "state", None) or "COMMENTED"
+            header = f"### @{author} — review ({state})"
+        else:
+            header = f"### @{author} — comment"
+        if ts:
+            header += f" *({ts})*"
+        parts.append(header)
+        parts.append("")
+        parts.append(body.rstrip())
+        parts.append("")
+    return "\n".join(parts).rstrip()
+
+
 def kickoff_directive(
     *,
     repo: RepoInfo,
@@ -144,7 +180,7 @@ def kickoff_directive(
 ) -> str:
     """Kickoff for an untriaged issue that arrived via a maintainer mention.
 
-    `directive` is duck-typed to anything with `body` and `author` string
+    `directive` is duck-typed to anything with `body`, `author`, and `thread`
     attributes (see `worker.DirectiveInfo`). Imported lazily to avoid a
     persona → worker circular dependency.
     """
@@ -155,6 +191,7 @@ def kickoff_directive(
             "issue": issue,
             "workspace": workspace,
             "directive": {"body": directive.body, "author": directive.author},
+            "thread": _render_thread(getattr(directive, "thread", ()) or ()),
         },
     )
 
@@ -197,6 +234,7 @@ def directive(
             "workspace": workspace,
             "comment": comment,
             "directive": {"body": directive.body, "author": directive.author},
+            "thread": _render_thread(getattr(directive, "thread", ()) or ()),
             "state": {"pr_status": pr_status},
         },
     )
