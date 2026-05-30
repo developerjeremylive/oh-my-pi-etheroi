@@ -26,6 +26,7 @@ import { skillCapability } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import { slashCommandCapability } from "@oh-my-pi/pi-coding-agent/capability/slash-command";
 import { toolCapability } from "@oh-my-pi/pi-coding-agent/capability/tool";
 import type { LoadContext, Provider } from "@oh-my-pi/pi-coding-agent/capability/types";
+import { YAML } from "bun";
 // Register all discovery providers as a side effect.
 import "@oh-my-pi/pi-coding-agent/discovery";
 import {
@@ -104,9 +105,7 @@ function ctx(): LoadContext {
 	return { cwd: project, home, repoRoot: project };
 }
 
-test("project settings.json#extensions surfaces every sub-directory", async () => {
-	writeFile(path.join(project, ".omp", "settings.json"), JSON.stringify({ extensions: [ext] }));
-
+async function expectExtensionSubDirectoriesLoaded(): Promise<void> {
 	const [skills, commands, rules, prompts, hooks, tools, mcps] = await Promise.all([
 		loadFromPlugin<{ name: string }>(skillCapability.id, ctx()),
 		loadFromPlugin<{ name: string }>(slashCommandCapability.id, ctx()),
@@ -125,10 +124,29 @@ test("project settings.json#extensions surfaces every sub-directory", async () =
 	expect(hooks.some(h => h.name === "edit.sh" && h.type === "post")).toBe(true);
 	expect(tools.map(t => t.name)).toEqual(expect.arrayContaining(["wcount", "deep-tool"]));
 	expect(mcps.find(m => m.name === "lsp")?.command).toBe("lsp-server");
+}
+
+test("project settings.json#extensions surfaces every sub-directory", async () => {
+	writeFile(path.join(project, ".omp", "settings.json"), JSON.stringify({ extensions: [ext] }));
+
+	await expectExtensionSubDirectoriesLoaded();
+});
+
+test("project config.yml#extensions surfaces every sub-directory", async () => {
+	writeFile(path.join(project, ".omp", "config.yml"), YAML.stringify({ extensions: [ext] }, null, 2));
+
+	await expectExtensionSubDirectoriesLoaded();
 });
 
 test("user settings.json#extensions also feeds sub-discovery", async () => {
 	writeFile(path.join(home, ".omp", "agent", "settings.json"), JSON.stringify({ extensions: [ext] }));
+
+	const skills = await loadFromPlugin<{ name: string }>(skillCapability.id, ctx());
+	expect(skills.map(s => s.name)).toContain("my-skill");
+});
+
+test("user config.yml#extensions also feeds sub-discovery", async () => {
+	writeFile(path.join(home, ".omp", "agent", "config.yml"), YAML.stringify({ extensions: [ext] }, null, 2));
 
 	const skills = await loadFromPlugin<{ name: string }>(skillCapability.id, ctx());
 	expect(skills.map(s => s.name)).toContain("my-skill");

@@ -1,16 +1,16 @@
 /**
  * OMP extension package roots.
  *
- * An "extension package root" is a directory configured via either
- * `extensions:` in user/project settings or the `--extension`/`-e` CLI flag
- * that points to a packaged extension on disk. The package's standard
- * sub-directories (`skills/`, `hooks/`, `tools/`, `commands/`, `rules/`,
- * `prompts/`, `.mcp.json`) are wired into discovery by `omp-plugins.ts`.
+ * An "extension package root" is a directory configured via `extensions:` in
+ * user/project `config.yml` or legacy `settings.json`, or via the
+ * `--extension`/`-e` CLI flag, that points to a packaged extension on disk.
+ * The package's standard sub-directories (`skills/`, `hooks/`, `tools/`,
+ * `commands/`, `rules/`, `prompts/`, `.mcp.json`) are wired into discovery by
+ * `omp-plugins.ts`.
  *
  * CLI-provided paths are injected via {@link injectOmpExtensionCliRoots}
- * before discovery runs; settings paths are read lazily from
- * `<scope>/settings.json` in {@link listOmpExtensionRoots} to mirror what
- * `loadExtensionModules` already does.
+ * before discovery runs; configured paths are read lazily from the same
+ * project/user config scopes that `loadExtensionModules` consumes.
  *
  * @see ./omp-plugins.ts
  * @see ./builtin.ts `loadExtensionModules`
@@ -18,6 +18,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { isEnoent, logger, tryParseJson } from "@oh-my-pi/pi-utils";
+import { YAML } from "bun";
 import { readDirEntries, readFile } from "../capability/fs";
 import type { LoadContext } from "../capability/types";
 import { getEnabledPlugins } from "../extensibility/plugins/loader";
@@ -95,6 +96,20 @@ async function readSettingsExtensions(settingsPath: string): Promise<string[]> {
 	return raw.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
 }
 
+async function readConfigYamlExtensions(configPath: string): Promise<string[]> {
+	const content = await readFile(configPath);
+	if (!content) return [];
+	try {
+		const parsed = YAML.parse(content);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return [];
+		const raw = (parsed as Record<string, unknown>).extensions;
+		if (!Array.isArray(raw)) return [];
+		return raw.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
+	} catch {
+		return [];
+	}
+}
+
 function resolveAgainst(raw: string, ctx: LoadContext): string {
 	const tilde = expandTilde(raw, ctx.home);
 	return path.isAbsolute(tilde) ? tilde : path.resolve(ctx.cwd, tilde);
@@ -121,8 +136,8 @@ async function isDirectory(p: string): Promise<boolean> {
  * are dropped):
  *
  * 1. CLI roots injected via {@link injectOmpExtensionCliRoots}
- * 2. Project `<cwd>/.omp/settings.json#extensions`
- * 3. User `~/.omp/agent/settings.json#extensions`
+ * 2. Project `<cwd>/.omp/config.yml#extensions` and legacy `settings.json#extensions`
+ * 3. User `~/.omp/agent/config.yml#extensions` and legacy `settings.json#extensions`
  * 4. Enabled plugins installed under `<plugins>/node_modules/` (e.g. via
  *    `omp install <pkg>` / `omp plugin install` / `omp plugin link`)
  *
@@ -134,11 +149,21 @@ async function isDirectory(p: string): Promise<boolean> {
  */
 export async function listOmpExtensionRoots(ctx: LoadContext): Promise<OmpExtensionRoot[]> {
 	const { project, user } = scopeDirs(ctx);
-	const [projectExtensions, userExtensions, installedPlugins] = await Promise.all([
+	const [
+		projectSettingsExtensions,
+		projectConfigExtensions,
+		userSettingsExtensions,
+		userConfigExtensions,
+		installedPlugins,
+	] = await Promise.all([
 		readSettingsExtensions(path.join(project, "settings.json")),
+		readConfigYamlExtensions(path.join(project, "config.yml")),
 		readSettingsExtensions(path.join(user, "settings.json")),
+		readConfigYamlExtensions(path.join(user, "config.yml")),
 		listInstalledPluginRoots(ctx),
 	]);
+	const projectExtensions = [...projectSettingsExtensions, ...projectConfigExtensions];
+	const userExtensions = [...userSettingsExtensions, ...userConfigExtensions];
 
 	const candidates: InjectedRoot[] = [
 		...injectedCliRoots,
